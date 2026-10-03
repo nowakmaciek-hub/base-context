@@ -158,6 +158,8 @@ export interface CompactionSettings {
 	keepRecentTokens: number;
 	/** Soft working-context target; the model limit always takes precedence. */
 	targetTokens?: number | "model-limit";
+	/** Default-off paper candidate; changes summary content only. */
+	structuredSummary?: boolean;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -552,6 +554,22 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
+const STRUCTURED_SUMMARY_INSTRUCTIONS = `Also include these concise sections, using only information in the conversation or previous summary:
+
+## Ruled-out Approaches
+- [Approach, reason it was ruled out, and supporting evidence]
+
+## Evidence & Sources
+- [Key evidence with exact source links or paths when available]
+
+## Open Constraints & Preferences
+- [Unresolved constraints and user preferences that still apply]
+
+## Completed vs Remaining Work
+- [Distinguish completed work from remaining work]
+
+Preserve unknowns as unknowns. Do not invent evidence or fabricate source links.`;
+
 const RUNTIME_STATE_SUMMARY_NOTE =
 	"Runtime note: this summary does not establish whether a Python kernel is live or whether its variables, imports, helpers, or jobs remain available. Preserve useful names and their last observed state, including uncertainty. Use current runtime reports before relying on them; do not infer either survival or loss from compaction.";
 
@@ -598,12 +616,17 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * Build the instruction portion of the summarization prompt: the initial or
  * update template, optional user instructions, and the runtime-state qualification.
  */
-export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
+export function buildSummarizationPrompt(
+	customInstructions?: string,
+	previousSummary?: string,
+	structuredSummary = false,
+): string {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
 	}
-	return `${basePrompt}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
+	const prompt = `${basePrompt}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
+	return structuredSummary ? `${prompt}\n\n${STRUCTURED_SUMMARY_INSTRUCTIONS}` : prompt;
 }
 
 /**
@@ -622,10 +645,11 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
 	outputTokenLimit?: number,
+	structuredSummary = false,
 ): Promise<SummarySlice> {
 	const maxTokens = outputTokenLimit ?? Math.floor(0.8 * reserveTokens);
 
-	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
+	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary, structuredSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
 	const llmMessages = convertToLlm(currentMessages);
 	const conversationText = serializeConversation(llmMessages);
@@ -1008,6 +1032,7 @@ export async function compact(
 							thinkingLevel,
 							requests,
 							historyLimit,
+							settings.structuredSummary,
 						),
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
@@ -1022,6 +1047,7 @@ export async function compact(
 					thinkingLevel,
 					requests,
 					turnLimit,
+					settings.structuredSummary,
 				),
 			),
 		]);
@@ -1041,6 +1067,7 @@ export async function compact(
 				thinkingLevel,
 				requests,
 				historyLimit,
+				settings.structuredSummary,
 			),
 		);
 		slices.push(result);
@@ -1087,11 +1114,15 @@ async function generateTurnPrefixSummary(
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
 	outputTokenLimit?: number,
+	structuredSummary = false,
 ): Promise<SummarySlice> {
 	const maxTokens = outputTokenLimit ?? Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const basePrompt = structuredSummary
+		? `${TURN_PREFIX_SUMMARIZATION_PROMPT}\n\n${STRUCTURED_SUMMARY_INSTRUCTIONS}`
+		: TURN_PREFIX_SUMMARIZATION_PROMPT;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${basePrompt}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

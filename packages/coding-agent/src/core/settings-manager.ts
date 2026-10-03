@@ -157,6 +157,14 @@ export type McpServerConfig =
 			callTimeoutMs?: number;
 	  };
 
+export interface PaperCandidateSettings {
+	structuredSummary?: boolean;
+	completionGate?: boolean;
+	costGatedCompaction?: boolean;
+	completionCommand?: string;
+	completionTimeoutMs?: number; // default: 30000
+}
+
 export interface Settings {
 	onboardingShown?: boolean;
 	onboardingCompleted?: boolean;
@@ -177,6 +185,7 @@ export interface Settings {
 	/** Complete native invocation output, separate from the working context. */
 	invocationOutput?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
+	paperCandidates?: PaperCandidateSettings;
 	/** Creation default; an existing session changes policy through its canonical owner. */
 	context?: { mode?: "on" | "off" };
 	autoRefine?: AutoRefineSettings;
@@ -899,6 +908,23 @@ export class SettingsManager {
 		const mode = this.settings.context?.mode ?? "on";
 		if (mode !== "on" && mode !== "off") throw new Error("context.mode must be on or off");
 		return mode;
+	}
+
+	getPaperCandidateSettings(): {
+		structuredSummary: boolean;
+		completionGate: boolean;
+		costGatedCompaction: boolean;
+		completionCommand?: string;
+		completionTimeoutMs: number;
+	} {
+		const settings = this.settings.paperCandidates;
+		return {
+			structuredSummary: settings?.structuredSummary ?? false,
+			completionGate: settings?.completionGate ?? false,
+			costGatedCompaction: settings?.costGatedCompaction ?? false,
+			completionCommand: settings?.completionCommand,
+			completionTimeoutMs: settings?.completionTimeoutMs ?? 30000,
+		};
 	}
 
 	getCompactionEnabled(): boolean {
