@@ -10,7 +10,7 @@ const disabled = {
 };
 
 describe("paper candidate settings", () => {
-	it("keeps absent and explicit-false candidates disabled without adding normal defaults", () => {
+	it("keeps all defaults off and explicit-false candidates disabled without adding normal settings", () => {
 		const settings = SettingsManager.inMemory();
 		expect(settings.getPaperCandidateSettings()).toEqual(disabled);
 		expect(settings.getGlobalSettings()).not.toHaveProperty("paperCandidates");

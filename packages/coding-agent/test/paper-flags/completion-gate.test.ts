@@ -10,7 +10,6 @@ afterEach(async () => {
 
 async function completionHarness(enabled: boolean, command?: string, timeoutMs = 30000): Promise<Harness> {
 	const harness = await createHarness({
-		initialGoal: { objective: "finish the migration" },
 		settings: {
 			paperCandidates: { completionGate: enabled, completionCommand: command, completionTimeoutMs: timeoutMs },
 		},
