@@ -1,0 +1,1 @@
+- Fixed manual compaction timing out after 30 seconds while its model summary was still running.
