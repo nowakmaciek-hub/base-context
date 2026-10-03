@@ -1,0 +1,1 @@
+- Added default-off experimental settings for structured compaction summaries, host-checked goal completion, and cost-gated compaction timing.

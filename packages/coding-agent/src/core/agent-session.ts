@@ -46,7 +46,6 @@ import {
 } from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { PRODUCT } from "../product-identity.js";
-
 import { sleep } from "../utils/sleep.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
@@ -247,6 +246,7 @@ import {
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import { PAPER_COST_GATE_DIAGNOSTIC, PaperCompactionCostGate, runPaperCompletionCommand } from "./paper-candidates.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import {
@@ -1268,6 +1268,7 @@ export class AgentSession {
 		tools: Agent["state"]["tools"];
 		settings: string;
 	};
+	private _paperCompactionCostGate = new PaperCompactionCostGate();
 	private _failedThresholdCompaction?: {
 		isCurrent: BoundCompactionSink["isCurrent"];
 		configuration: string;
@@ -4282,6 +4283,33 @@ export class AgentSession {
 		return false;
 	}
 
+	private async _shouldCompactAtThreshold(
+		message: AssistantMessage,
+		contextTokens: number,
+		contextWindow: number,
+		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
+		owner: CompactionOwner,
+	): Promise<boolean> {
+		const fixedContextTokens = estimateFixedCompactionTokens(
+			this.systemPrompt,
+			this.agent.state.tools,
+			this.messages,
+		);
+		if (!shouldCompact(contextTokens, contextWindow, settings, fixedContextTokens)) return false;
+		if (!this.settingsManager.getPaperCandidateSettings().costGatedCompaction) return true;
+		const { decision, fresh } = this._paperCompactionCostGate.decide(message, {
+			contextTokens,
+			contextWindow,
+			fixedContextTokens,
+			reserveTokens: settings.reserveTokens,
+			keepRecentTokens: settings.keepRecentTokens,
+			mainModel: this.model,
+			summaryModel: this._resolveCompactionModel()?.model,
+		});
+		if (fresh) await owner.manager.appendCustomEntry(PAPER_COST_GATE_DIAGNOSTIC, decision);
+		return this._isCompactionOwnerCurrent(owner) && decision.action === "compact";
+	}
+
 	private async _thresholdCompactionNeeded(
 		context: ShouldStopAfterTurnContext,
 		owner = this._captureCompactionOwner(),
@@ -4301,12 +4329,7 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
 		if (
 			contextTokens === undefined ||
-			!shouldCompact(
-				contextTokens,
-				contextWindow,
-				settings,
-				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
-			)
+			!(await this._shouldCompactAtThreshold(context.message, contextTokens, contextWindow, settings, owner))
 		)
 			return false;
 		if (this._hasFailedThresholdCompaction()) return false;
@@ -4925,7 +4948,13 @@ export class AgentSession {
 		if (!this._goalState.objective || this._goalState.status === "idle") {
 			throw new Error("cannot complete goal because this thread has no goal");
 		}
-		const goal = this._goalWithAccountedWallClock();
+		const settings = this.settingsManager.getPaperCandidateSettings();
+		const owner = settings.completionGate ? this._captureGoalContinuationOwner() : undefined;
+		if (owner) {
+			await runPaperCompletionCommand(settings.completionCommand, this._cwd, settings.completionTimeoutMs);
+			this._assertGoalContinuationOwner(owner);
+		}
+		const goal = owner ? this._goalWithCurrentWallClock() : this._goalWithAccountedWallClock();
 		// A turn can cross the budget and complete the goal at once: accounting
 		// runs at message_end, before the completing ipython cell executes, so a
 		// budget-limit context may already be steered. It is stale now — drop it.
@@ -4946,6 +4975,7 @@ export class AgentSession {
 					actor: "runtime",
 					previousGoalId: goal.goalId,
 				}),
+				continuationOwner: owner,
 			},
 		);
 	}
@@ -9661,7 +9691,10 @@ export class AgentSession {
 			}
 
 			const { model, thinkingLevel } = selected;
-			const settings = { ...this.settingsManager.getCompactionSettings() };
+			const settings = {
+				...this.settingsManager.getCompactionSettings(),
+				structuredSummary: this.settingsManager.getPaperCandidateSettings().structuredSummary,
+			};
 			const semanticEdges = owner.semanticEdges;
 			compaction = owner.manager.bindCompactionSink();
 			requests = owner.requests.capture(compaction);
@@ -10047,6 +10080,7 @@ export class AgentSession {
 			}
 			// Only the canonical append ACK commits summary slices and advances the semantic epoch.
 			committed = { entryId: savedCompactionId, result };
+			this._paperCompactionCostGate.reset();
 			compactionSettled = true;
 			for (const requestId of uncommittedSlices.splice(0)) {
 				semanticEdges.finishRequest(requestId);
@@ -11341,14 +11375,7 @@ export class AgentSession {
 		// assistant usage are included, matching the /usage context display.
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
-		if (
-			shouldCompact(
-				contextTokens,
-				contextWindow,
-				settings,
-				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
-			)
-		) {
+		if (await this._shouldCompactAtThreshold(assistantMessage, contextTokens, contextWindow, settings, owner)) {
 			if (this._hasFailedThresholdCompaction()) return false;
 			if (!this._pendingCheckpoint && queueAutonomousContinuation) {
 				if (
@@ -11504,7 +11531,10 @@ export class AgentSession {
 			const selected = this._resolveCompactionModel();
 			const model = selected?.model;
 			const thinkingLevel = selected?.thinkingLevel ?? this.thinkingLevel;
-			const settings = { ...this.settingsManager.getCompactionSettings() };
+			const settings = {
+				...this.settingsManager.getCompactionSettings(),
+				structuredSummary: this.settingsManager.getPaperCandidateSettings().structuredSummary,
+			};
 			const semanticEdges = owner.semanticEdges;
 			compaction = owner.manager.bindCompactionSink();
 			requests = owner.requests.capture(compaction);
